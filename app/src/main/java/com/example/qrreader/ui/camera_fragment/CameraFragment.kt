@@ -1,27 +1,28 @@
 package com.example.qrreader.ui.camera_fragment
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.content.Intent
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
-import androidx.camera.core.AspectRatio
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
+import androidx.annotation.ColorInt
+import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.DrawableCompat
 import androidx.fragment.app.Fragment
+import androidx.fragment.app.viewModels
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LiveData
+import com.example.qrreader.QRAnalyzer
+import com.example.qrreader.QRListListener
 import com.example.qrreader.databinding.FragmentCameraBinding
 import com.google.android.material.snackbar.Snackbar
 import com.google.mlkit.vision.barcode.Barcode
-import com.google.mlkit.vision.barcode.BarcodeScannerOptions
-import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.common.InputImage
 import com.karumi.dexter.Dexter
 import com.karumi.dexter.PermissionToken
 import com.karumi.dexter.listener.PermissionDeniedResponse
@@ -30,10 +31,14 @@ import com.karumi.dexter.listener.PermissionRequest
 import com.karumi.dexter.listener.single.CompositePermissionListener
 import com.karumi.dexter.listener.single.PermissionListener
 import com.karumi.dexter.listener.single.SnackbarOnDeniedPermissionListener
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import timber.log.Timber
 import java.util.concurrent.ExecutionException
 
-class CameraFragment : Fragment() {
+
+@ExperimentalCoroutinesApi
+class CameraFragment : Fragment(), QRListListener {
+    private val viewModel by viewModels<CameraViewModel>()
     private lateinit var binding: FragmentCameraBinding
 
     private val lensFacing = CameraSelector.LENS_FACING_BACK
@@ -43,10 +48,9 @@ class CameraFragment : Fragment() {
     private val cameraProviderFuture by lazy { ProcessCameraProvider.getInstance(requireContext()) }
     private val mainExecutor by lazy { ContextCompat.getMainExecutor(requireContext()) }
 
-    private lateinit var cameraProvider: ProcessCameraProvider
-
-    private var preview: Preview? = null
-    private var analysis: ImageAnalysis? = null
+    private var camera: Camera? = null
+    private var torchState = TorchState.OFF
+    private var isTorchAvailable = false
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -61,6 +65,36 @@ class CameraFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
 
         checkPermission()
+
+        viewModel.cameraProvider.observe(viewLifecycleOwner) {
+            it?.let {
+                bindUseCases(it)
+            }
+        }
+
+        viewModel.camera.observe(viewLifecycleOwner) {
+            camera = it
+            it?.let {
+                observeTorchState(it.cameraInfo.torchState)
+            }
+        }
+
+        viewModel.isTorchAvailable.observe(viewLifecycleOwner) {
+            isTorchAvailable = it
+            setTorchColor(if (!isTorchAvailable) Color.RED else Color.YELLOW)
+        }
+
+        viewModel.latestQR.observe(viewLifecycleOwner) { barcodeNullable ->
+            barcodeNullable?.let { barcode ->
+                barcode.url?.url?.let {
+                    openURLOnSnackbar(it, it)
+                }
+            }
+        }
+
+        binding.torch.setOnClickListener {
+            if (isTorchAvailable) camera?.cameraControl?.enableTorch(torchState != TorchState.ON)
+        }
     }
 
     private fun checkPermission() {
@@ -98,103 +132,79 @@ class CameraFragment : Fragment() {
     }
 
     private fun setup() {
+        Timber.i("Setup called")
         cameraProviderFuture.addListener(
             {
                 try {
-                    cameraProvider = cameraProviderFuture.get()
+                    viewModel.setCameraProvider(cameraProviderFuture.get())
                 } catch (e: ExecutionException) {
                     Timber.e(e)
                 } catch (e: InterruptedException) {
                     Timber.e(e)
                 }
-                bindUseCases()
-
             },
             mainExecutor
         )
 
     }
 
-    private fun bindUseCases() {
-        bindPreview()
-        bindAnalyse()
+    private fun bindUseCases(cameraProvider: ProcessCameraProvider) {
+        cameraProvider.unbindAll()
+        val camera = cameraProvider.bindToLifecycleWithExceptionHandling(
+            viewLifecycleOwner,
+            cameraSelector,
+            getPreviewUseCase(),
+            getAnalyzeUseCase()
+        )
+
+        if (camera != null) viewModel.setCamera(camera)
     }
 
-    private fun bindPreview() {
-        if (preview != null) {
-            cameraProvider.unbind(preview)
-        }
-
-        preview = Preview.Builder()
+    private fun getPreviewUseCase(): Preview {
+        val preview = Preview.Builder()
             .setTargetAspectRatio(AspectRatio.RATIO_16_9)
             .setTargetRotation(Surface.ROTATION_0)
             .build()
 
-        preview!!.setSurfaceProvider(binding.preview.surfaceProvider)
+        preview.setSurfaceProvider(binding.preview.surfaceProvider)
 
-        try {
-            cameraProvider.bindToLifecycle(viewLifecycleOwner, cameraSelector, preview)
-        } catch (e: IllegalStateException) {
-            Timber.e(e)
-        } catch (e: IllegalArgumentException) {
-            Timber.e(e)
-        }
+        return preview
     }
 
-    @SuppressLint("UnsafeOptInUsageError")
-    private fun bindAnalyse() {
-        val options = BarcodeScannerOptions.Builder()
-            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-            .build()
-        val scanner = BarcodeScanning.getClient(options)
-
-        if (analysis != null) {
-            cameraProvider.unbind(analysis)
-        }
-
-        analysis = ImageAnalysis.Builder()
+    private fun getAnalyzeUseCase(): ImageAnalysis {
+        val analysis = ImageAnalysis.Builder()
             .setTargetAspectRatio(AspectRatio.RATIO_16_9)
             .setTargetRotation(Surface.ROTATION_0)
             .build()
 
-        analysis!!.setAnalyzer(mainExecutor, { imageProxy ->
-            val mediaImage = imageProxy.image
-            if (mediaImage != null) {
-                val image =
-                    InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-                scanner.process(image)
-                    .addOnSuccessListener { barcodes ->
-                        barcodes.forEach {
-                            when (it.valueType) {
-                                Barcode.TYPE_URL -> {
-                                    it?.let { barcode ->
-                                        barcode.url?.url?.let {
-                                            openURLOnSnackbar(it, it)
-                                        }
-                                    }
-                                }
-                                else -> Timber.i("${it.rawValue} - ${it.valueType}")
-                            }
-                        }
-                    }
-                    .addOnFailureListener {
-                        Timber.e(it)
-                    }.addOnCompleteListener {
-                        // When the image is from CameraX analysis use case, must call image.close() on received
-                        // images when finished using them. Otherwise, new images may not be received or the camera
-                        // may stall.
-                        imageProxy.close()
-                    }
+        analysis.setAnalyzer(mainExecutor, QRAnalyzer(this))
+
+        return analysis
+    }
+
+    override fun qrList(list: List<Barcode>) {
+        list.forEach {
+            when (it.valueType) {
+                Barcode.TYPE_URL -> {
+                    viewModel.setLatestQR(it)
+                }
+                else -> Timber.i(it.rawValue)
             }
-        })
-
-        try {
-            cameraProvider.bindToLifecycle(viewLifecycleOwner, cameraSelector, analysis)
-        } catch (e: IllegalStateException) {
-            Timber.e(e)
-        } catch (e: IllegalArgumentException) {
-            Timber.e(e)
         }
+    }
+
+    private fun observeTorchState(torchStateLiveData: LiveData<Int>) {
+        torchStateLiveData.observe(viewLifecycleOwner) {
+            torchState = it
+            if (isTorchAvailable) setTorchColor(if (torchState == TorchState.ON) Color.WHITE else Color.YELLOW)
+        }
+    }
+
+    private fun setTorchColor(@ColorInt tint: Int) {
+        DrawableCompat.setTint(
+            DrawableCompat.wrap(binding.torch.drawable),
+            tint
+        )
     }
 
     private fun openURLOnSnackbar(title: String, url: String) {
@@ -205,5 +215,20 @@ class CameraFragment : Fragment() {
                 startActivity(i)
             }
             .show()
+    }
+
+    private fun ProcessCameraProvider.bindToLifecycleWithExceptionHandling(
+        lifecycleOwner: LifecycleOwner,
+        cameraSelector: CameraSelector,
+        vararg useCases: UseCase
+    ): Camera? {
+        try {
+            return this.bindToLifecycle(lifecycleOwner, cameraSelector, *useCases)
+        } catch (e: IllegalStateException) {
+            Timber.e(e)
+        } catch (e: IllegalArgumentException) {
+            Timber.e(e)
+        }
+        return null
     }
 }
