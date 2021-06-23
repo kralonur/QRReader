@@ -2,6 +2,8 @@ package com.example.qrreader.ui.camera_fragment
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.Surface
@@ -15,6 +17,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import com.example.qrreader.databinding.FragmentCameraBinding
+import com.google.android.material.snackbar.Snackbar
 import com.google.mlkit.vision.barcode.Barcode
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
@@ -164,6 +167,11 @@ class CameraFragment : Fragment() {
                         barcodes.forEach {
                             when (it.valueType) {
                                 Barcode.TYPE_URL -> {
+                                    it?.let { barcode ->
+                                        barcode.url?.url?.let {
+                                            openURLOnSnackbar(it, it)
+                                        }
+                                    }
                                 }
                                 else -> Timber.i("${it.rawValue} - ${it.valueType}")
                             }
@@ -187,5 +195,15 @@ class CameraFragment : Fragment() {
         } catch (e: IllegalArgumentException) {
             Timber.e(e)
         }
+    }
+
+    private fun openURLOnSnackbar(title: String, url: String) {
+        Snackbar.make(binding.root, title, Snackbar.LENGTH_INDEFINITE)
+            .setAction("GO") {
+                val i = Intent(Intent.ACTION_VIEW)
+                i.data = Uri.parse(url)
+                startActivity(i)
+            }
+            .show()
     }
 }
