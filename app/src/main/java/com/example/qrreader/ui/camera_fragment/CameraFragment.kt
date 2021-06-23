@@ -1,5 +1,6 @@
 package com.example.qrreader.ui.camera_fragment
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.os.Bundle
 import android.view.LayoutInflater
@@ -18,6 +19,14 @@ import com.google.mlkit.vision.barcode.Barcode
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
+import com.karumi.dexter.Dexter
+import com.karumi.dexter.PermissionToken
+import com.karumi.dexter.listener.PermissionDeniedResponse
+import com.karumi.dexter.listener.PermissionGrantedResponse
+import com.karumi.dexter.listener.PermissionRequest
+import com.karumi.dexter.listener.single.CompositePermissionListener
+import com.karumi.dexter.listener.single.PermissionListener
+import com.karumi.dexter.listener.single.SnackbarOnDeniedPermissionListener
 import timber.log.Timber
 import java.util.concurrent.ExecutionException
 
@@ -48,7 +57,41 @@ class CameraFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        setup()
+        checkPermission()
+    }
+
+    private fun checkPermission() {
+        val permissionListener = object : PermissionListener {
+            override fun onPermissionGranted(p0: PermissionGrantedResponse?) {
+                setup()
+            }
+
+            override fun onPermissionDenied(p0: PermissionDeniedResponse?) {
+            }
+
+            override fun onPermissionRationaleShouldBeShown(
+                p0: PermissionRequest?,
+                p1: PermissionToken?
+            ) {
+                p1?.continuePermissionRequest()
+            }
+        }
+
+        val snackbarOnDeniedPermissionListener = SnackbarOnDeniedPermissionListener.Builder
+            .with(
+                binding.root,
+                "Camera access is needed to read QR code"
+            )
+            .withOpenSettingsButton("Settings")
+            .build()
+
+        val compositePermissionListener =
+            CompositePermissionListener(permissionListener, snackbarOnDeniedPermissionListener)
+
+        Dexter.withContext(requireContext())
+            .withPermission(Manifest.permission.CAMERA)
+            .withListener(compositePermissionListener)
+            .check()
     }
 
     private fun setup() {
@@ -119,8 +162,9 @@ class CameraFragment : Fragment() {
                 scanner.process(image)
                     .addOnSuccessListener { barcodes ->
                         barcodes.forEach {
-                            when(it.valueType) {
-                                Barcode.TYPE_URL -> {}
+                            when (it.valueType) {
+                                Barcode.TYPE_URL -> {
+                                }
                                 else -> Timber.i("${it.rawValue} - ${it.valueType}")
                             }
                         }
